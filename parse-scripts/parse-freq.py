@@ -8,6 +8,16 @@ from typing import List
 from multiprocessing import Pool
 
 def process_dataset(name:str) -> tuple:
+    """
+    Process a dataset by calculating the total number of peaks in each file.
+
+    Args:
+        name (str): The name of the dataset.
+
+    Returns:
+        tuple: A tuple containing the name of the dataset, a list of total peaks for each file,
+               the total number of files processed, and an error message if any.
+    """
     h5_dir = os.path.join(base_dir, name)
     total_peaks = []
     file_count = 0
@@ -69,7 +79,6 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         print("Usage: python parse-freq.py <dataset1> [dataset2 ...] <plot_name>")
         sys.exit(1)
-
     base_dir = '/bioxfel/user/amkurth/'
     dataset_names = sys.argv[1:-1]
     plot_name = sys.argv[-1]
