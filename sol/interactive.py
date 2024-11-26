@@ -1,89 +1,134 @@
+#!/usr/bin/env python3
+"""
+Efficient interactive session launcher for SOL supercomputer.
+Usage: python interactive.py start [cpu|gpu] <hours>
+"""
+
 import subprocess
 import sys
-import time
+import argparse
+from datetime import datetime
 
-def fetch_sinfo():
+def get_partition_info():
+    """Get partition information using minimal processing"""
     try:
-        print("Fetching partition information...")
-        result = subprocess.run(['sinfo', '-o', '%P %a %l %D %T %N'], capture_output=True, text=True)
-        if result.returncode == 0:
-            # Simple loading bar
-            total = 10
-            for i in range(total):
-                bar_length = int((i + 1) / total * 50)
-                bar = '#' * bar_length + '-' * (50 - bar_length)
-                print(f"\r[{bar}] {int((i + 1) / total * 100)}%", end='', flush=True)
-                time.sleep(0.5)  # Sleep to simulate loading time
-            print("\n")
-            return result.stdout
-        else:
-            print("\nFailed to fetch GPU status:", result.stderr)
-            return None
-    except Exception as e:
-        print("\nAn error occurred while fetching GPU status:", str(e))
+        cmd = ['sinfo', '-h', '-o', '%P %a %l %D %T %N']
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip().split('\n')
+    except subprocess.CalledProcessError as e:
+        print(f"Error fetching partition info: {e.stderr}")
+        sys.exit(1)
+
+def parse_partition_line(line):
+    """Parse a single partition line efficiently"""
+    try:
+        parts = line.split()
+        return {
+            'name': parts[0],
+            'avail': parts[1],
+            'timelimit': parts[2],
+            'nodes': int(parts[3]),
+            'state': parts[4],
+            'nodelist': parts[5] if len(parts) > 5 else ''
+        }
+    except (IndexError, ValueError):
         return None
 
-def parse_sinfo(sinfo_output):
+def get_available_partitions(resource_type):
+    """Get available partitions based on resource type"""
     partitions = []
-    for line in sinfo_output.strip().split('\n')[1:]:
-        parts = line.split()
-        if len(parts) >= 5:
-            partitions.append({
-                'name': parts[0],
-                'availability': parts[1],
-                'timelimit': parts[2],
-                'nodes': int(parts[3]),
-                'state': parts[4],
-                'nodelist': parts[5] if len(parts) > 5 else None
-            })
+    partition_data = get_partition_info()
+    
+    for line in partition_data:
+        part = parse_partition_line(line)
+        if not part:
+            continue
+            
+        # Filter based on resource type and availability
+        is_gpu = 'highmem' in part['name'] or 'htc' in part['name']
+        if ((resource_type == 'gpu' and is_gpu) or 
+            (resource_type == 'cpu' and not is_gpu)) and part['avail'] == 'up':
+            partitions.append(part)
+    
     return partitions
 
-def select_optimal_partition(partitions, resource_type):
-    optimal = None
-    max_idle_nodes = -1
-    for part in partitions:
-        if ('gpu' in part['name'].lower() if resource_type == 'gpu' else 'gpu' not in part['name'].lower()):
-            if part['state'].lower() == 'idle' and part['nodes'] > max_idle_nodes:
-                max_idle_nodes = part['nodes']
-                optimal = part
-    return optimal
-
 def determine_qos(partition_name):
+    """Determine QOS based on partition name"""
     if 'htc' in partition_name:
         return 'normal'
     elif 'general' in partition_name:
         return 'public'
-    else:
-        return 'wildfire'
+    return 'wildfire'
 
-def start_interactive_session(partition_name, resource_type, time_hours):
-    qos = determine_qos(partition_name)
-    gres_option = f"--gres={resource_type}:1" if resource_type == 'gpu' else ""
-    time_flag = f"--time={time_hours}"
-    command = f"interactive -p {partition_name} -q {qos} {time_flag} {gres_option}"
-    print("Starting interactive session with the following command:")
-    print(command)
+def start_interactive_session(partition, resource_type, hours):
+    """Start an interactive session with specified parameters"""
+    qos = determine_qos(partition['name'])
+    
+    # Build command with correct argument order
+    cmd = [
+        'srun',
+        '--partition', partition['name'],
+        '--qos', qos,
+        '--time', f'{hours}:00:00',
+        '--cpus-per-task=1',
+        '--pty',
+    ]
+    
+    if resource_type == 'gpu':
+        cmd.extend(['--gres=gpu:1'])
+    
+    # Add shell command at the end
+    cmd.append('/bin/bash')
+    
+    print(f"\nStarting interactive session on partition: {partition['name']}")
+    print(f"QOS: {qos}")
+    print(f"Time limit: {hours} hours")
+    print(f"Resource type: {resource_type}")
+    print("\nCommand:", ' '.join(cmd))
+    
     try:
-        subprocess.run(command, shell=True)
-    except Exception as e:
-        print("Failed to start session:", e)
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\nSession request cancelled by user")
+    except subprocess.CalledProcessError as e:
+        print(f"\nError starting session: {e}")
 
 def main():
-    if len(sys.argv) > 3 and sys.argv[1] == 'start':
-        resource_type = 'gpu' if sys.argv[2] == 'gpu' else 'cpu'
-        time_hours = sys.argv[3]
-        sinfo_output = fetch_sinfo()
-        if sinfo_output:
-            partitions = parse_sinfo(sinfo_output)
-            optimal_partition = select_optimal_partition(partitions, resource_type)
-            if optimal_partition:
-                print("Selected optimal partition based on availability:", optimal_partition)
-                start_interactive_session(optimal_partition['name'], resource_type, time_hours)
-            else:
-                print("No optimal partition found based on the criteria.")
-    else:
-        print("Usage:")
-        print("python script.py start [cpu|gpu] <hours>")
+    parser = argparse.ArgumentParser(description='SOL Interactive Session Launcher')
+    parser.add_argument('action', choices=['start'], help='Action to perform')
+    parser.add_argument('resource_type', choices=['cpu', 'gpu'], help='Resource type')
+    parser.add_argument('hours', type=int, help='Session duration in hours')
+    
+    args = parser.parse_args()
+    
+    # Get available partitions
+    partitions = get_available_partitions(args.resource_type)
+    
+    if not partitions:
+        print(f"No available {args.resource_type} partitions found")
+        sys.exit(1)
+    
+    # Sort partitions by number of available nodes
+    partitions.sort(key=lambda x: x['nodes'], reverse=True)
+    
+    # Display available partitions
+    print("\nAvailable partitions:")
+    for i, part in enumerate(partitions, 1):
+        print(f"{i}. {part['name']} ({part['nodes']} nodes, {part['timelimit']} time limit)")
+    
+    # Let user select partition
+    while True:
+        try:
+            choice = int(input("\nSelect partition number: ")) - 1
+            if 0 <= choice < len(partitions):
+                selected_partition = partitions[choice]
+                break
+            print("Invalid selection. Please try again.")
+        except ValueError:
+            print("Please enter a number.")
+    
+    # Start session
+    start_interactive_session(selected_partition, args.resource_type, args.hours)
 
 if __name__ == "__main__":
     main()
